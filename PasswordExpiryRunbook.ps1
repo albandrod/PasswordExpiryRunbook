@@ -24,6 +24,9 @@
 
 .PARAMETER AzureConnectionName 
     Name of the Azure Automation Connection asset configured on the Automation Account
+
+.PARAMETER AzureCredentialName 
+    Name of the Service Account Credentials asset configured on the Automation Account
      
 .PARAMETER StorageAccountName 
     The name of a Storage Account to store or retrieve data 
@@ -40,9 +43,6 @@
 .PARAMETER ImportContainer 
     The name of a Container in a Storage Account to import a Blob. Default is import
 
-.PARAMETER PathToPlaceBlob 
-    The path within the Automation Account to temporarily store the Blob prior to import export to a Storage Account.
-
 .Example
     $params = @{
         AzureConnectionName = "conn_spn_passwordexpiry"
@@ -58,6 +58,9 @@ param
     [Parameter(Mandatory = $true)]
     [String]$AzureConnectionName,
 
+    [Parameter(Mandatory = $true)]
+    [String]$AzureCredentialName,
+
     [parameter(Mandatory=$true)]
     [String] $StorageAccountName,
 
@@ -71,10 +74,7 @@ param
     [String] $ExportContainer = "export",
     
     [parameter(Mandatory=$false)]
-    [String] $ImportContainer = "import",
-
-    [parameter(Mandatory=$false)]
-    [String] $PathToPlaceBlob = "$($env:TEMP)"
+    [String] $ImportContainer = "import"
 )
 
 #region Functions
@@ -132,6 +132,7 @@ Function Test-SelfService
 
 #region Variables and Setup
 $expiryDays = 90
+$PathToPlaceBlob = $env:TEMP
 $ErrorActionPreference =  "Continue"
 $version = "0.01.24102019";
 Write-Output " Script Version: $($version)"
@@ -146,7 +147,7 @@ try
     
     Write-Output '', " Logging in to Azure AD..."
     Import-Module -Name MSOnline
-    $creds = Get-AutomationPSCredential -Name 'AzureADConnectSyncAccount'
+    $creds = Get-AutomationPSCredential -Name $AzureCredentialName
     Connect-MsolService -Credential $creds
 
     Write-Output '', " Logging in to Azure..."
@@ -170,16 +171,16 @@ try
         -Destination $PathToPlaceBlob `
         -Context $StorageContext `
         -Force
-    Write-Output " SUCCESS! Got the Storage Account Blob Content!"
+    Write-Output " SUCCESS! Storage Account Blob Content written to '$($PathToPlaceBlob)\$($ImportBlobName)'"
 
     Write-Output '', " Checking '$($PathToPlaceBlob)\$($ImportBlobName)'..."
     $Item = Get-Item -Path "$($PathToPlaceBlob)\$($ImportBlobName)" -ErrorAction Stop
     Write-Output " SUCCESS! '$($PathToPlaceBlob)\$($ImportBlobName)' exists!"
 
     Write-output "`r`n Importing Data from Blob....."
-    $Data = Get-Item -Path "$($PathToPlaceBlob)\$($ImportBlobName)" | Get-Content
-    $Data = $Data | ConvertFrom-Json
-    $Data = $Data.ResultSets.Table1
+    $tmpData1 = $Item | Get-Content
+    $tmpData2 = $tmpData1 | ConvertFrom-Json
+    $Data = $tmpData2.ResultSets.Table1
 
     Write-output "`r`n Check Users in Azure AD....."
     $Results = @()
@@ -206,7 +207,7 @@ try
             
             if ($result -like "*expire*")
             {
-                Write-Output " User: $($User.UserPrincipalName)"
+                Write-Output " User: $($user.UserPrincipalName)"
                 Write-Output " Result: $($result)"
                 Write-Output " Message: $($test.message)"
                 If ($test.email) {Write-Output " Email: $($test.email)"; $email = $test.email } else { $email = "" }
