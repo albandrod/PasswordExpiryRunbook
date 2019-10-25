@@ -28,14 +28,17 @@
 .PARAMETER StorageAccountName 
     The name of a Storage Account to store or retrieve data 
  
-.PARAMETER BlobName 
-    The name of a Blob (Filename) to containing data 
+.PARAMETER ExportBlobName 
+    The name of a Blob (Filename) to containing data to Export
+
+.PARAMETER ImportBlobName 
+    The name of a Blob (Filename) to containing data to Import
 
 .PARAMETER ExportContainer 
     The name of a Container in a Storage Account to export the Blob too.
 
-.PARAMETER ExportContainer 
-    The name of a Container in a Storage Account to export the Blob too. Default is export
+.PARAMETER ImportContainer 
+    The name of a Container in a Storage Account to import a Blob. Default is import
 
 .PARAMETER PathToPlaceBlob 
     The path within the Automation Account to temporarily store the Blob prior to import export to a Storage Account.
@@ -44,7 +47,8 @@
     $params = @{
         AzureConnectionName = "conn_spn_passwordexpiry"
         StorageAccountName = "stppasswordexpiry1"
-        BlobName = "password_expiry.txt"
+        ImportBlobName = "data.json"
+        ExportBlobName = "password_expiry.txt"
     }
 
     Test-PasswordExpirty @params
@@ -53,18 +57,21 @@ param
 (
     [Parameter(Mandatory = $true)]
     [String]$AzureConnectionName,
-    
-    [Parameter(Mandatory = $true)]
-    [String]$AzureADGroup,
 
     [parameter(Mandatory=$true)]
     [String] $StorageAccountName,
 
     [parameter(Mandatory=$true)]
-    [String] $BlobName,
+    [String] $ExportBlobName,
+
+    [parameter(Mandatory=$true)]
+    [String] $ImportBlobName,
 
     [parameter(Mandatory=$false)]
     [String] $ExportContainer = "export",
+    
+    [parameter(Mandatory=$false)]
+    [String] $ImportContainer = "import",
 
     [parameter(Mandatory=$false)]
     [String] $PathToPlaceBlob = "$($env:TEMP)"
@@ -156,67 +163,86 @@ try
     $StorageContext = New-AzureStorageContext -StorageAccountName $StorageAccount.StorageAccountName -StorageAccountKey $AccessKey
     Write-Output " SUCCESS! Got Storage Account Context!"
 
-    Write-output "`r`n Getting Users from Azure AD....."    
-    $Group = Get-MsolGroup -SearchString $AzureADGroup
+    Write-Output '', " Getting the Storage Account Blob Content..."
+    $Blob = Get-AzureStorageBlobContent `
+        -Blob $ImportBlobName `
+        -Container $ImportContainer `
+        -Destination $PathToPlaceBlob `
+        -Context $StorageContext `
+        -Force
+    Write-Output " SUCCESS! Got the Storage Account Blob Content!"
+
+    Write-Output '', " Checking '$($PathToPlaceBlob)\$($ImportBlobName)'..."
+    $Item = Get-Item -Path "$($PathToPlaceBlob)\$($ImportBlobName)" -ErrorAction Stop
+    Write-Output " SUCCESS! '$($PathToPlaceBlob)\$($ImportBlobName)' exists!"
+
+    Write-output "`r`n Importing Data from Blob....."
+    $Data = Get-Item -Path "$($PathToPlaceBlob)\$($ImportBlobName)" | Get-Content
+    $Data = $Data | ConvertFrom-Json
+    $Data = $Data.ResultSets.Table1
+
+    Write-output "`r`n Check Users in Azure AD....."
     $Results = @()
 
-    foreach ($member in Get-MsolGroupMember -GroupObjectId $Group.ObjectId -All)
+    foreach ($member in $Data)
     {
-        $user = Get-MsolUser -ObjectId $member.ObjectId
-        $pwdLastSet = Get-Date $user.LastPasswordChangeTimestamp
-        $expiry = $pwdLastSet.AddDays($expiryDays)
-        $dateNow = Get-Date
-        $sevenDayWarnDate = $dateNow.AddDays(7)
-        $threeDayWarnDate = $dateNow.AddDays(3)
-        $oneDayWarnDate = $dateNow.AddDays(1)
-        
-        Switch ($Expiry)
+        if ($user = Get-MsolUser -UserPrincipalName $member.InstituteEmailAddress -ErrorAction SilentlyContinue)
         {
-            {$_ -le $dateNow} {$result = "has expired"; $test = Test-SelfService -User $user; Break }
-            {$_ -le $oneDayWarnDate} { $result = "will expire in 1 Day!"; $test = Test-SelfService -User $user; Break }
-            {$_ -le $threeDayWarnDate} { $result = "will expire in 3 Days!"; $test = Test-SelfService -User $user; Break }
-            {$_ -le $sevenDayWarnDate} { $result = "will expire in 7 Days!"; $test = Test-SelfService -User $user; Break}
-            Default { $result = "is OK"; $test = Test-SelfService -User $user -Default $true; Break }
-        }
-        
-        if ($result -like "*expire*")
-        {
-            Write-Output " User: $($User.UserPrincipalName)"
-            Write-Output " Result: $($result)"
-            Write-Output " Message: $($test.message)"
-            If ($test.email) {Write-Output " Email: $($test.email)"; $email = $test.email } else { $email = "" }
-            If ($test.phone) {Write-Output " Phone: $($test.phone)"; $phone = $test.phone } else { $phone = "" }
-            Write-Output ""
+            $pwdLastSet = Get-Date $user.LastPasswordChangeTimestamp
+            $expiry = $pwdLastSet.AddDays($expiryDays)
+            $dateNow = Get-Date
+            $sevenDayWarnDate = $dateNow.AddDays(7)
+            $threeDayWarnDate = $dateNow.AddDays(3)
+            $oneDayWarnDate = $dateNow.AddDays(1)
             
-            if ($email -or $phone)
+            Switch ($Expiry)
             {
-                $tmp = New-Object PSObject -Property @{
-                    user = $user.UserPrincipalName
-                    displayName = $user.displayName
-                    firstName = $user.firstName
-                    lastName = $user.lastName
-                    result = $result
-                    email = $email
-                    phone = $phone
-                }
+                {$_ -le $dateNow} {$result = "has expired"; $test = Test-SelfService -User $user; Break }
+                {$_ -le $oneDayWarnDate} { $result = "will expire in 1 Day!"; $test = Test-SelfService -User $user; Break }
+                {$_ -le $threeDayWarnDate} { $result = "will expire in 3 Days!"; $test = Test-SelfService -User $user; Break }
+                {$_ -le $sevenDayWarnDate} { $result = "will expire in 7 Days!"; $test = Test-SelfService -User $user; Break}
+                Default { $result = "is OK"; $test = Test-SelfService -User $user -Default $true; Break }
+            }
+            
+            if ($result -like "*expire*")
+            {
+                Write-Output " User: $($User.UserPrincipalName)"
+                Write-Output " Result: $($result)"
+                Write-Output " Message: $($test.message)"
+                If ($test.email) {Write-Output " Email: $($test.email)"; $email = $test.email } else { $email = "" }
+                If ($test.phone) {Write-Output " Phone: $($test.phone)"; $phone = $test.phone } else { $phone = "" }
+                Write-Output ""
+                
+                if ($email -or $phone)
+                {
+                    $tmp = New-Object PSObject -Property @{
+                        user = $user.UserPrincipalName
+                        displayName = $user.displayName
+                        firstName = $user.firstName
+                        lastName = $user.lastName
+                        result = $result
+                        email = $email
+                        phone = $phone
+                    }
 
-                $Results += $tmp
+                    $Results += $tmp
+                }
             }
         }        
     }
 
     if ($Results)
     {
-        $Results | ConvertTo-Json | Out-File -FilePath "$($PathToPlaceBlob)\$($BlobName)" -Force
+        $Results | ConvertTo-Json | Out-File -FilePath "$($PathToPlaceBlob)\$($ExportBlobName)" -Force
             
-        Write-Output '', " Writing '$($BlobName)' to Azure Blob Storage..."
+        Write-Output '', " Writing '$($ExportBlobName)' to Azure Blob Storage..."
         $Blob = Set-AzureStorageBlobContent `
-            -Blob $BlobName `
+            -Blob $ExportBlobName `
             -Container $ExportContainer `
-            -File "$($PathToPlaceBlob)\$($BlobName)" `
+            -File "$($PathToPlaceBlob)\$($ExportBlobName)" `
             -Context $StorageContext `
             -Force
-        Write-Output " SUCCESS! Wrote '$($BlobName)' to Azure Blob Storage!"
+        Write-Output " SUCCESS! Wrote '$($ExportBlobName)' to Azure Blob Storage!"
     } else 
     {
         Write-Output " WARNING! Nothing to Export!"
