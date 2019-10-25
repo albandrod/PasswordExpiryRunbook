@@ -131,9 +131,10 @@ Function Test-SelfService
 #endregion
 
 #region Variables and Setup
+$ErrorActionPreference =  "Continue"
 $expiryDays = 90
 $PathToPlaceBlob = $env:TEMP
-$ErrorActionPreference =  "Continue"
+$regex = "^[a-zA-Z0-9.!£#$%&'^_`{}~-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*$"
 $version = "0.01.24102019";
 Write-Output " Script Version: $($version)"
 #endregion
@@ -185,7 +186,7 @@ try
     Write-output "`r`n Check Users in Azure AD....."
     $Results = @()
 
-    foreach ($member in $Data)
+    foreach ($member in $Data | Where-Object InstituteEmailAddress -match $regex)
     {
         if ($user = Get-MsolUser -UserPrincipalName $member.InstituteEmailAddress -ErrorAction SilentlyContinue)
         {
