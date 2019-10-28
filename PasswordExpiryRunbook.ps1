@@ -22,9 +22,6 @@
 	your processes will be. To ensure maximum disk space in your processes, make sure to clean up any local
 	files a runbook transfers or creates in the process before the runbook completes.
 
-.PARAMETER AzureConnectionName 
-    Name of the Azure Automation Connection asset configured on the Automation Account
-
 .PARAMETER AzureCredentialName 
     Name of the Service Account Credentials asset configured on the Automation Account
      
@@ -56,9 +53,6 @@
 param
 (
     [Parameter(Mandatory = $true)]
-    [String]$AzureConnectionName,
-
-    [Parameter(Mandatory = $true)]
     [String]$AzureCredentialName,
 
     [parameter(Mandatory=$true)]
@@ -77,62 +71,12 @@ param
     [String] $ImportContainer = "import"
 )
 
-#region Functions
-Function Test-SelfService
-{
-	Param
-	(
-		[object]$User,
-		[bool]$Default = $false
-	)
-	
-	If ($User.StrongAuthenticationUserDetails.email -or $User.StrongAuthenticationUserDetails.PhoneNumber)
-	{
-        # Transforming Phone number (mobile) to send email via SMS gateway
-        $phone = $User.StrongAuthenticationUserDetails.PhoneNumber
-
-        if (-Not [string]::IsNullOrEmpty($phone))
-        {
-            $phone = $phone.replace('+', '')
-            $phone = $phone.replace(' ', '')
-            $phone = $phone + "@marketing.sms.whispir.it"
-        }
-        
-        Switch ($Default)
-		{
-			$true 
-            { 
-                $result = @{
-                    message = "SSPR Registered - do nothing"
-                    email = $User.StrongAuthenticationUserDetails.email
-                    phone = $phone
-                } 
-            }
-			$false 
-            { 
-                $result = @{
-                    message = "SSPR Registered - goto https://aka.ms/sspr"
-                    email = $User.StrongAuthenticationUserDetails.email
-                    phone = $phone
-                }
-            }
-		}
-	} else
-	{
-		$result = @{
-            message = "SSPR Not Registered - do nothing"
-            email = ""
-            phone =""
-        }
-	}
-
-    return $result
-}
-#endregion
-
 #region Variables and Setup
 $ErrorActionPreference =  "Continue"
-$expiryDays = 90
+$dateNow = Get-Date
+$expiryDays = 90 # Must match On-Premises Active Directory Default Password Policy
+$expiry = $dateNow.AddDays(-$expiryDays)
+$sevenDayWarnDate = $dateNow.AddDays(7)
 $PathToPlaceBlob = $env:TEMP
 $regex = "^[a-zA-Z0-9.!£#$%&'^_`{}~-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*$"
 $version = "0.01.24102019";
@@ -141,23 +85,15 @@ Write-Output " Script Version: $($version)"
 
 #region Main Code
 try
-{  
-    Write-Output '', " Getting the connection 'AzureRunAsConnection'..."
-    $servicePrincipalConnection = Get-AutomationConnection -Name $AzureConnectionName
-    $environment = Get-AzureRmEnvironment -Name AzureCloud
-    
+{     
     Write-Output '', " Logging in to Azure AD..."
     Import-Module -Name MSOnline
     $creds = Get-AutomationPSCredential -Name $AzureCredentialName
     Connect-MsolService -Credential $creds
 
     Write-Output '', " Logging in to Azure..."
-    $Context = Login-AzureRmAccount `
-        -ServicePrincipal `
-        -TenantId $servicePrincipalConnection.TenantId `
-        -ApplicationId $servicePrincipalConnection.ApplicationId `
-        -CertificateThumbprint $servicePrincipalConnection.CertificateThumbprint `
-        -Environment $environment
+    Add-AzureRmAccount -Identity
+    $Context = Get-AzureRmContext
 
     Write-Output '', " Getting the Storage Account Context..."
     $StorageAccount = Get-AzureRmStorageAccount | Where-Object StorageAccountName -eq $StorageAccountName
@@ -184,53 +120,37 @@ try
     $Data = $tmpData2.ResultSets.Table1
 
     Write-output "`r`n Check Users in Azure AD....."
+    $Users = Get-MsolUser -All | Where-Object {$_.LastPasswordChangeTimestamp -ge $expiry -and $_.LastPasswordChangeTimestamp -le $sevenDayWarnDate -and ($_.StrongAuthenticationUserDetails.email -or $_.StrongAuthenticationUserDetails.PhoneNumber)}
+
     $Results = @()
+    $count = 0
 
-    foreach ($member in $Data | Where-Object InstituteEmailAddress -match $regex)
+    foreach ($user in $Users)
     {
-        if ($user = Get-MsolUser -UserPrincipalName $member.InstituteEmailAddress -ErrorAction SilentlyContinue)
-        {
-            $pwdLastSet = Get-Date $user.LastPasswordChangeTimestamp
-            $expiry = $pwdLastSet.AddDays($expiryDays)
-            $dateNow = Get-Date
-            $sevenDayWarnDate = $dateNow.AddDays(7)
-            $threeDayWarnDate = $dateNow.AddDays(3)
-            $oneDayWarnDate = $dateNow.AddDays(1)
-            
-            Switch ($Expiry)
-            {
-                {$_ -le $dateNow} {$result = "has expired"; $test = Test-SelfService -User $user; Break }
-                {$_ -le $oneDayWarnDate} { $result = "will expire in 1 Day!"; $test = Test-SelfService -User $user; Break }
-                {$_ -le $threeDayWarnDate} { $result = "will expire in 3 Days!"; $test = Test-SelfService -User $user; Break }
-                {$_ -le $sevenDayWarnDate} { $result = "will expire in 7 Days!"; $test = Test-SelfService -User $user; Break}
-                Default { $result = "is OK"; $test = Test-SelfService -User $user -Default $true; Break }
-            }
-            
-            if ($result -like "*expire*")
-            {
-                Write-Output " User: $($user.UserPrincipalName)"
-                Write-Output " Result: $($result)"
-                Write-Output " Message: $($test.message)"
-                If ($test.email) {Write-Output " Email: $($test.email)"; $email = $test.email } else { $email = "" }
-                If ($test.phone) {Write-Output " Phone: $($test.phone)"; $phone = $test.phone } else { $phone = "" }
-                Write-Output ""
-                
-                if ($email -or $phone)
-                {
-                    $tmp = New-Object PSObject -Property @{
-                        user = $user.UserPrincipalName
-                        displayName = $user.displayName
-                        firstName = $user.firstName
-                        lastName = $user.lastName
-                        result = $result
-                        email = $email
-                        phone = $phone
-                    }
+        $count ++
 
-                    $Results += $tmp
-                }
+        if ($user.UserPrincipalName -in $Data.InstituteEmailAddress)
+        {
+            $result = "has expired or will expire within 7 days!";
+            Write-Output " User: $($user.UserPrincipalName)"
+            Write-Output " Result: $($result)"
+            Write-Output " Email: $($user.StrongAuthenticationUserDetails.email)"
+            Write-Output " Phone: $($user.StrongAuthenticationUserDetails.PhoneNumber)"
+            Write-Output " Count: $($count)"
+            Write-Output ""
+
+            $tmp = New-Object PSObject -Property @{
+                user = $user.UserPrincipalName
+                displayName = $user.displayName
+                firstName = $user.firstName
+                lastName = $user.lastName
+                result = $result
+                email = $user.StrongAuthenticationUserDetails.email
+                phone = $user.StrongAuthenticationUserDetails.PhoneNumber
             }
-        }        
+
+            $Results += $tmp
+        }
     }
 
     if ($Results)
