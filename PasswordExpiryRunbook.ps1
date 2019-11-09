@@ -139,6 +139,14 @@ try
             Write-Output " Count: $($count)"
             Write-Output ""
 
+            $phone = $user.StrongAuthenticationUserDetails.PhoneNumber
+            if (-Not [string]::IsNullOrEmpty($phone))
+            {
+                $phone = $phone.replace('+', '')
+                $phone = $phone.replace(' ', '')
+                $phone = $phone + "@marketing.sms.whispir.it"
+            }
+
             $tmp = New-Object PSObject -Property @{
                 user = $user.UserPrincipalName
                 displayName = $user.displayName
@@ -146,7 +154,7 @@ try
                 lastName = $user.lastName
                 result = $result
                 email = $user.StrongAuthenticationUserDetails.email
-                phone = $user.StrongAuthenticationUserDetails.PhoneNumber
+                phone = $phone
             }
 
             $Results += $tmp
