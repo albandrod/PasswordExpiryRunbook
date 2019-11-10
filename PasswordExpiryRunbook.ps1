@@ -74,9 +74,9 @@ param
 #region Variables and Setup
 $ErrorActionPreference =  "Continue"
 $dateNow = Get-Date
-$expiryDays = 90 # Must match On-Premises Active Directory Default Password Policy
-$expiry = $dateNow.AddDays(-$expiryDays)
-$sevenDayWarnDate = $dateNow.AddDays(7)
+$maxPwdAge = 90
+[int32]$In7days= ($dateNow-($dateNow.AddDays(7-$maxPwdAge))).TotalDays
+[int32]$30DaysAgo = ($dateNow-($dateNow.AddDays(-$maxPwdAge-30))).TotalDays
 $PathToPlaceBlob = $env:TEMP
 $regex = "^[a-zA-Z0-9.!£#$%&'^_`{}~-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*$"
 $version = "0.01.24102019";
@@ -97,7 +97,7 @@ try
 
     Write-Output '', " Getting the Storage Account Context..."
     $StorageAccount = Get-AzureRmStorageAccount | Where-Object StorageAccountName -eq $StorageAccountName
-    $AccessKey = (Get-AzureRmStorageAccountKey -Name $StorageAccount.StorageAccountName -ResourceGroupName $StorageAccount.ResourceGroupName | Select -First 1).Value 
+    $AccessKey = (Get-AzureRmStorageAccountKey -Name $StorageAccount.StorageAccountName -ResourceGroupName $StorageAccount.ResourceGroupName | Select-Object -First 1).Value 
     $StorageContext = New-AzureStorageContext -StorageAccountName $StorageAccount.StorageAccountName -StorageAccountKey $AccessKey
     Write-Output " SUCCESS! Got Storage Account Context!"
 
@@ -120,31 +120,22 @@ try
     $Data = $tmpData2.ResultSets.Table1
 
     Write-output "`r`n Check Users in Azure AD....."
-    $Users = Get-MsolUser -All | Where-Object {$_.LastPasswordChangeTimestamp -ge $expiry -and $_.LastPasswordChangeTimestamp -le $sevenDayWarnDate -and ($_.StrongAuthenticationUserDetails.email -or $_.StrongAuthenticationUserDetails.PhoneNumber)}
-
+    $Users = Get-MsolUser -All | Where-Object {$_.LastPasswordChangeTimestamp -and ($_.StrongAuthenticationUserDetails.email -or $_.StrongAuthenticationUserDetails.PhoneNumber)} | Where-Object {[int32]($dateNow-($_.LastPasswordChangeTimestamp)).TotalDays -in $30DaysAgo..$In7days}
+    
     $Results = @()
     $count = 0
 
     foreach ($user in $Users)
-    {
+    {     
         $count ++
 
         if ($user.UserPrincipalName -in $Data.InstituteEmailAddress)
         {
-            $result = "has expired or will expire within 7 days!";
-            Write-Output " User: $($user.UserPrincipalName)"
-            Write-Output " Result: $($result)"
-            Write-Output " Email: $($user.StrongAuthenticationUserDetails.email)"
-            Write-Output " Phone: $($user.StrongAuthenticationUserDetails.PhoneNumber)"
-            Write-Output " Count: $($count)"
-            Write-Output ""
-
-            $phone = $user.StrongAuthenticationUserDetails.PhoneNumber
-            if (-Not [string]::IsNullOrEmpty($phone))
+            if ($user.StrongAuthenticationUserDetails.PhoneNumber)
             {
-                $phone = $phone.replace('+', '')
-                $phone = $phone.replace(' ', '')
-                $phone = $phone + "@marketing.sms.whispir.it"
+                $user.StrongAuthenticationUserDetails.PhoneNumber = $user.StrongAuthenticationUserDetails.PhoneNumber.replace('+', '')
+                $user.StrongAuthenticationUserDetails.PhoneNumber = $user.StrongAuthenticationUserDetails.PhoneNumber.replace(' ', '')
+                $user.StrongAuthenticationUserDetails.PhoneNumber = $user.StrongAuthenticationUserDetails.PhoneNumber + "@marketing.sms.whispir.it"
             }
 
             $tmp = New-Object PSObject -Property @{
@@ -152,10 +143,17 @@ try
                 displayName = $user.displayName
                 firstName = $user.firstName
                 lastName = $user.lastName
-                result = $result
+                result = "has expired or will expire within 7 days!"
                 email = $user.StrongAuthenticationUserDetails.email
-                phone = $phone
+                phone = $user.StrongAuthenticationUserDetails.PhoneNumber
             }
+            
+            Write-Output " User: $($tmp.user)"
+            Write-Output " Result: $($tmp.result)"
+            Write-Output " Email: $($tmp.email)"
+            Write-Output " Phone: $($tmp.phone)"
+            Write-Output " Count: $($count)"
+            Write-Output ""
 
             $Results += $tmp
         }
